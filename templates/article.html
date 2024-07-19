@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block title %} - Article{% endblock %}
+
+{% block content %}
+    <div class="article-content centered-content">
+        {{ content|safe }}
+    </div>
+{% endblock %}
