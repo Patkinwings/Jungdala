@@ -9,8 +9,9 @@ import secrets
 import logging
 from dotenv import load_dotenv
 from datetime import timedelta, datetime
-from sqlalchemy import create_engine
 import sys
+from sqlalchemy import create_engine
+from sqlalchemy.engine.url import make_url
 
 print("Python version:", sys.version)
 print("Python path:", sys.path)
@@ -25,10 +26,14 @@ app.secret_key = os.getenv('SECRET_KEY', secrets.token_hex(16))
 app.config['DEBUG'] = False  # Disable debug mode for production
 
 database_url = os.getenv('DATABASE_URL')
-if database_url and database_url.startswith("postgres://"):
-    database_url = database_url.replace("postgres://", "postgresql://", 1)
+url = make_url(database_url)
+engine = create_engine(url, connect_args={
+    "ssl": {
+        "ssl_ca": "/etc/ssl/cert.pem"
+    }
+})
 
-app.config['SQLALCHEMY_DATABASE_URI'] = database_url
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Session configuration
@@ -45,17 +50,6 @@ logging.basicConfig(level=logging.INFO)
 UPLOAD_FOLDER = os.path.join('static', 'uploads')
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
-
-# Create an SQLAlchemy engine
-engine = create_engine(database_url)
-
-# Verify the connection
-try:
-    with engine.connect() as connection:
-        result = connection.execute("SELECT 1")
-        print("Database connection successful!")
-except Exception as e:
-    print(f"Error connecting to the database: {e}")
 
 @app.after_request
 def add_csp_header(response):
@@ -97,9 +91,7 @@ def index():
     app.logger.info("Rendering index template")
     page = request.args.get('page', 1, type=int)
     per_page = 5  # Number of articles per page
-    
     articles = Article.query.order_by(Article.created_at.desc()).paginate(page=page, per_page=per_page)
-    
     return render_template('index.html', articles=articles)
 
 @app.route('/article/<int:article_id>')
@@ -188,7 +180,9 @@ def login():
         username = request.form.get('username')
         password = request.form.get('password')
         app.logger.info(f"Login attempt: username='{username}'")
+        
         admin = Admin.query.filter_by(username=username).first()
+        
         if admin:
             app.logger.info(f"Admin found: {admin.username}")
             if admin.check_password(password):
@@ -207,6 +201,7 @@ def login():
 @login_required
 def delete_article(article_id):
     article = Article.query.get_or_404(article_id)
+    
     try:
         db.session.delete(article)
         db.session.commit()
@@ -228,7 +223,7 @@ def page_not_found(e):
 
 @app.errorhandler(Exception)
 def handle_exception(e):
-    app.logger.error(f"Unhandled exception: {str(e)}")
+    app.logger.error(f"Unhandled exception: {str(e)}", exc_info=True)
     return "An error occurred", 500
 
 @app.route('/about')
@@ -238,15 +233,18 @@ def about():
 def create_admin(username, password):
     try:
         admin = Admin.query.filter_by(username=username).first()
+        
         if admin is None:
             admin = Admin(username=username)
             db.session.add(admin)
         admin.set_password(password)
         db.session.commit()
+        
         app.logger.info(f"Admin user '{username}' created/updated successfully.")
         
         # Verify the admin exists and password works
         admin = Admin.query.filter_by(username=username).first()
+        
         if admin and admin.check_password(password):
             app.logger.info("Admin credentials are correct.")
         else:
@@ -255,15 +253,10 @@ def create_admin(username, password):
         app.logger.error(f"Error creating admin user: {str(e)}")
         db.session.rollback()
 
-def reset_database():
+if __name__ == '__main__':
     with app.app_context():
-        db.drop_all()
         db.create_all()
         create_admin('admin', 'Jungdala')
-        app.logger.info("Database reset and admin user created")
-
-if __name__ == '__main__':
-    reset_database()
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
     app.logger.info("Starting server on http://localhost:5001")
     app.run(debug=False, host='localhost', port=5001)
