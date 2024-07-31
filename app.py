@@ -9,9 +9,7 @@ import secrets
 import logging
 from dotenv import load_dotenv
 from datetime import timedelta, datetime
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
-import asyncio
+from sqlalchemy import create_engine
 import sys
 
 print("Python version:", sys.version)
@@ -28,7 +26,7 @@ app.config['DEBUG'] = False  # Disable debug mode for production
 
 database_url = os.getenv('DATABASE_URL')
 if database_url and database_url.startswith("postgres://"):
-    database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+    database_url = database_url.replace("postgres://", "postgresql://", 1)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -48,20 +46,16 @@ UPLOAD_FOLDER = os.path.join('static', 'uploads')
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 
-# Create an SQLAlchemy async engine
-engine = create_async_engine(database_url, echo=True)
-async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+# Create an SQLAlchemy engine
+engine = create_engine(database_url)
 
 # Verify the connection
-async def verify_db_connection():
-    try:
-        async with engine.connect() as conn:
-            result = await conn.execute("SELECT 1")
-            print("Database connection successful!")
-    except Exception as e:
-        print(f"Error connecting to the database: {e}")
-
-asyncio.run(verify_db_connection())
+try:
+    with engine.connect() as connection:
+        result = connection.execute("SELECT 1")
+        print("Database connection successful!")
+except Exception as e:
+    print(f"Error connecting to the database: {e}")
 
 @app.after_request
 def add_csp_header(response):
@@ -99,32 +93,24 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 @app.route('/')
-async def index():
+def index():
     app.logger.info("Rendering index template")
     page = request.args.get('page', 1, type=int)
     per_page = 5  # Number of articles per page
     
-    async with async_session() as session:
-        result = await session.execute(Article.query.order_by(Article.created_at.desc()))
-        articles = result.scalars().all()
+    articles = Article.query.order_by(Article.created_at.desc()).paginate(page=page, per_page=per_page)
     
     return render_template('index.html', articles=articles)
 
 @app.route('/article/<int:article_id>')
-async def view_article(article_id):
-    async with async_session() as session:
-        result = await session.execute(Article.query.filter_by(id=article_id))
-        article = result.scalar_one_or_none()
-    
-    if article is None:
-        abort(404)
-    
+def view_article(article_id):
+    article = Article.query.get_or_404(article_id)
     html_content = markdown2.markdown(article.content)
     return render_template('article.html', article=article, content=html_content)
 
 @app.route('/admin', methods=['GET', 'POST'])
 @login_required
-async def admin():
+def admin():
     if request.method == 'POST':
         title = request.form.get('title', '').strip()
         content = request.form.get('content', '').strip()
@@ -145,15 +131,14 @@ async def admin():
                     return render_template('admin.html')
         
         new_article = Article(title=title, content=content)
-        async with async_session() as session:
-            session.add(new_article)
-            try:
-                await session.commit()
-                flash('Article created successfully!', 'success')
-            except Exception as e:
-                await session.rollback()
-                flash(f'Error creating article: {str(e)}', 'error')
-                return render_template('admin.html')
+        db.session.add(new_article)
+        try:
+            db.session.commit()
+            flash('Article created successfully!', 'success')
+        except Exception as e:
+            db.session.rollback()
+            flash(f'Error creating article: {str(e)}', 'error')
+            return render_template('admin.html')
         
         return redirect(url_for('index'))
     return render_template('admin.html')
@@ -166,13 +151,8 @@ def logout():
 
 @app.route('/edit/<int:article_id>', methods=['GET', 'POST'])
 @login_required
-async def edit_article(article_id):
-    async with async_session() as session:
-        result = await session.execute(Article.query.filter_by(id=article_id))
-        article = result.scalar_one_or_none()
-    
-    if article is None:
-        abort(404)
+def edit_article(article_id):
+    article = Article.query.get_or_404(article_id)
     
     if request.method == 'POST':
         title = request.form.get('title', '').strip()
@@ -185,21 +165,20 @@ async def edit_article(article_id):
         article.title = title
         article.content = content
         
-        async with async_session() as session:
-            try:
-                await session.commit()
-                flash('Article updated successfully!', 'success')
-            except Exception as e:
-                await session.rollback()
-                flash(f'Error updating article: {str(e)}', 'error')
-                return render_template('edit.html', article=article)
+        try:
+            db.session.commit()
+            flash('Article updated successfully!', 'success')
+        except Exception as e:
+            db.session.rollback()
+            flash(f'Error updating article: {str(e)}', 'error')
+            return render_template('edit.html', article=article)
         
         return redirect(url_for('view_article', article_id=article.id))
     
     return render_template('edit.html', article=article)
 
 @app.route('/login', methods=['GET', 'POST'])
-async def login():
+def login():
     if current_user.is_authenticated:
         return redirect(url_for('admin'))
     
@@ -209,11 +188,7 @@ async def login():
         username = request.form.get('username')
         password = request.form.get('password')
         app.logger.info(f"Login attempt: username='{username}'")
-        
-        async with async_session() as session:
-            result = await session.execute(Admin.query.filter_by(username=username))
-            admin = result.scalar_one_or_none()
-        
+        admin = Admin.query.filter_by(username=username).first()
         if admin:
             app.logger.info(f"Admin found: {admin.username}")
             if admin.check_password(password):
@@ -230,21 +205,15 @@ async def login():
 
 @app.route('/delete/<int:article_id>')
 @login_required
-async def delete_article(article_id):
-    async with async_session() as session:
-        result = await session.execute(Article.query.filter_by(id=article_id))
-        article = result.scalar_one_or_none()
-        
-        if article is None:
-            abort(404)
-        
-        try:
-            await session.delete(article)
-            await session.commit()
-            flash('Article deleted successfully!', 'success')
-        except Exception as e:
-            await session.rollback()
-            flash(f'Error deleting the article: {str(e)}', 'error')
+def delete_article(article_id):
+    article = Article.query.get_or_404(article_id)
+    try:
+        db.session.delete(article)
+        db.session.commit()
+        flash('Article deleted successfully!', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Error deleting the article: {str(e)}', 'error')
     return redirect(url_for('index'))
 
 @app.errorhandler(500)
@@ -266,43 +235,35 @@ def handle_exception(e):
 def about():
     return render_template('about.html')
 
-async def create_admin(username, password):
+def create_admin(username, password):
     try:
-        async with async_session() as session:
-            result = await session.execute(Admin.query.filter_by(username=username))
-            admin = result.scalar_one_or_none()
-            
-            if admin is None:
-                admin = Admin(username=username)
-                session.add(admin)
-            admin.set_password(password)
-            await session.commit()
-        
+        admin = Admin.query.filter_by(username=username).first()
+        if admin is None:
+            admin = Admin(username=username)
+            db.session.add(admin)
+        admin.set_password(password)
+        db.session.commit()
         app.logger.info(f"Admin user '{username}' created/updated successfully.")
         
         # Verify the admin exists and password works
-        async with async_session() as session:
-            result = await session.execute(Admin.query.filter_by(username=username))
-            admin = result.scalar_one_or_none()
-        
+        admin = Admin.query.filter_by(username=username).first()
         if admin and admin.check_password(password):
             app.logger.info("Admin credentials are correct.")
         else:
             app.logger.error("Failed to verify admin credentials.")
     except Exception as e:
         app.logger.error(f"Error creating admin user: {str(e)}")
-        async with async_session() as session:
-            await session.rollback()
+        db.session.rollback()
 
-async def reset_database():
-    async with engine.begin() as conn:
-        await conn.run_sync(db.metadata.drop_all)
-        await conn.run_sync(db.metadata.create_all)
-    await create_admin('admin', 'Jungdala')
-    app.logger.info("Database reset and admin user created")
+def reset_database():
+    with app.app_context():
+        db.drop_all()
+        db.create_all()
+        create_admin('admin', 'Jungdala')
+        app.logger.info("Database reset and admin user created")
 
 if __name__ == '__main__':
-    asyncio.run(reset_database())
+    reset_database()
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
     app.logger.info("Starting server on http://localhost:5001")
     app.run(debug=False, host='localhost', port=5001)
