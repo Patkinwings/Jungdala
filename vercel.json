@@ -11,13 +11,5 @@
       "src": "/(.*)",
       "dest": "app.py"
     }
-  ],
-  "functions": {
-    "app.py": {
-      "maxDuration": 30
-    }
-  },
-  "env": {
-    "KV_URL": "@kv_url"
-  }
+  ]
 }
