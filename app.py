@@ -10,8 +10,6 @@ import logging
 from dotenv import load_dotenv
 from datetime import timedelta, datetime
 import sys
-from sqlalchemy import create_engine
-from sqlalchemy.engine.url import make_url
 
 print("Python version:", sys.version)
 print("Python path:", sys.path)
@@ -26,14 +24,10 @@ app.secret_key = os.getenv('SECRET_KEY', secrets.token_hex(16))
 app.config['DEBUG'] = False  # Disable debug mode for production
 
 database_url = os.getenv('DATABASE_URL')
-url = make_url(database_url)
-engine = create_engine(url, connect_args={
-    "ssl": {
-        "ssl_ca": "/etc/ssl/cert.pem"
-    }
-})
+if database_url and database_url.startswith("postgres://"):
+    database_url = database_url.replace("postgres://", "postgresql+pg8000://", 1)
 
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Session configuration
