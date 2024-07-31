@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, abort
+from flask import Flask, render_template, request, redirect, url_for, flash, abort, jsonify
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_sqlalchemy import SQLAlchemy
 import os
@@ -8,7 +8,8 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import secrets
 import logging
 from dotenv import load_dotenv
-from redis import ConnectionPool, Redis
+from redis import Redis
+from redis.client import Redis as RedisClient
 from redis.exceptions import RedisError
 import json
 
@@ -33,10 +34,14 @@ UPLOAD_FOLDER = os.path.join('static', 'uploads')
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 
-# Connect to Vercel KV (Redis)
+class CustomRedis(RedisClient):
+    def __init__(self, *args, **kwargs):
+        kwargs['socket_timeout'] = 2
+        kwargs['socket_connect_timeout'] = 2
+        super().__init__(*args, **kwargs)
+
 redis_url = os.getenv('KV_URL')
-redis_pool = ConnectionPool.from_url(redis_url)
-redis_client = Redis(connection_pool=redis_pool)
+redis_client = CustomRedis.from_url(redis_url)
 
 class Admin(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -60,6 +65,8 @@ def redis_get(key):
     max_retries = 3
     for attempt in range(max_retries):
         try:
+            if not redis_client.ping():
+                raise RedisError("Redis connection failed")
             return redis_client.get(key)
         except RedisError as e:
             app.logger.error(f"Redis error on attempt {attempt + 1}: {str(e)}")
@@ -70,6 +77,8 @@ def redis_set(key, value):
     max_retries = 3
     for attempt in range(max_retries):
         try:
+            if not redis_client.ping():
+                raise RedisError("Redis connection failed")
             return redis_client.set(key, value)
         except RedisError as e:
             app.logger.error(f"Redis error on attempt {attempt + 1}: {str(e)}")
@@ -80,6 +89,8 @@ def redis_delete(key):
     max_retries = 3
     for attempt in range(max_retries):
         try:
+            if not redis_client.ping():
+                raise RedisError("Redis connection failed")
             return redis_client.delete(key)
         except RedisError as e:
             app.logger.error(f"Redis error on attempt {attempt + 1}: {str(e)}")
@@ -93,10 +104,18 @@ def index():
     per_page = 5  # Number of articles per page
     
     try:
+        app.logger.debug("Attempting to connect to Redis")
+        redis_client.ping()
+        app.logger.debug("Successfully connected to Redis")
+        
         # Get all article keys from Redis
+        app.logger.debug("Fetching article keys from Redis")
         article_keys = redis_client.keys('article:*')
+        app.logger.debug(f"Found {len(article_keys)} article keys")
+        
         articles = []
         for key in article_keys:
+            app.logger.debug(f"Fetching article data for key: {key}")
             article_data = json.loads(redis_get(key))
             articles.append({'title': article_data['title'], 'filename': key.decode().split(':')[1]})
         
@@ -268,10 +287,19 @@ def about():
 def health_check():
     try:
         redis_client.ping()
-        return "OK", 200
+        return jsonify({
+            "status": "OK",
+            "redis": "Connected",
+            "redis_url": redis_url[:10] + "..." + redis_url[-10:]  # Show part of the URL for debugging
+        }), 200
     except RedisError as e:
         app.logger.error(f"Redis health check failed: {str(e)}")
-        return "Redis connection failed", 500
+        return jsonify({
+            "status": "Error",
+            "redis": "Failed",
+            "error": str(e),
+            "redis_url": redis_url[:10] + "..." + redis_url[-10:]
+        }), 500
 
 def create_admin(username, password):
     try:
