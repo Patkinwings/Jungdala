@@ -8,9 +8,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import secrets
 import logging
 from dotenv import load_dotenv
-from redis import Redis
-from redis.client import Redis as RedisClient
-from redis.exceptions import RedisError
+from vercel_kv import VercelKV
 import json
 
 load_dotenv()
@@ -34,14 +32,7 @@ UPLOAD_FOLDER = os.path.join('static', 'uploads')
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 
-class CustomRedis(RedisClient):
-    def __init__(self, *args, **kwargs):
-        kwargs['socket_timeout'] = 2
-        kwargs['socket_connect_timeout'] = 2
-        super().__init__(*args, **kwargs)
-
-redis_url = os.getenv('KV_URL')
-redis_client = CustomRedis.from_url(redis_url)
+kv = VercelKV()
 
 class Admin(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -61,63 +52,43 @@ def load_user(user_id):
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def redis_get(key):
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            if not redis_client.ping():
-                raise RedisError("Redis connection failed")
-            return redis_client.get(key)
-        except RedisError as e:
-            app.logger.error(f"Redis error on attempt {attempt + 1}: {str(e)}")
-            if attempt == max_retries - 1:
-                raise
+async def kv_get(key):
+    try:
+        return await kv.get(key)
+    except Exception as e:
+        app.logger.error(f"KV error: {str(e)}")
+        raise
 
-def redis_set(key, value):
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            if not redis_client.ping():
-                raise RedisError("Redis connection failed")
-            return redis_client.set(key, value)
-        except RedisError as e:
-            app.logger.error(f"Redis error on attempt {attempt + 1}: {str(e)}")
-            if attempt == max_retries - 1:
-                raise
+async def kv_set(key, value):
+    try:
+        return await kv.set(key, value)
+    except Exception as e:
+        app.logger.error(f"KV error: {str(e)}")
+        raise
 
-def redis_delete(key):
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            if not redis_client.ping():
-                raise RedisError("Redis connection failed")
-            return redis_client.delete(key)
-        except RedisError as e:
-            app.logger.error(f"Redis error on attempt {attempt + 1}: {str(e)}")
-            if attempt == max_retries - 1:
-                raise
+async def kv_delete(key):
+    try:
+        return await kv.delete(key)
+    except Exception as e:
+        app.logger.error(f"KV error: {str(e)}")
+        raise
 
 @app.route('/')
-def index():
+async def index():
     app.logger.debug("Rendering index template")
     page = request.args.get('page', 1, type=int)
     per_page = 5  # Number of articles per page
     
     try:
-        app.logger.debug("Attempting to connect to Redis")
-        redis_client.ping()
-        app.logger.debug("Successfully connected to Redis")
-        
-        # Get all article keys from Redis
-        app.logger.debug("Fetching article keys from Redis")
-        article_keys = redis_client.keys('article:*')
+        app.logger.debug("Fetching article keys from KV")
+        article_keys = await kv.keys('article:*')
         app.logger.debug(f"Found {len(article_keys)} article keys")
         
         articles = []
         for key in article_keys:
             app.logger.debug(f"Fetching article data for key: {key}")
-            article_data = json.loads(redis_get(key))
-            articles.append({'title': article_data['title'], 'filename': key.decode().split(':')[1]})
+            article_data = json.loads(await kv_get(key))
+            articles.append({'title': article_data['title'], 'filename': key.split(':')[1]})
         
         total = len(articles)
         articles = articles[(page-1)*per_page:page*per_page]
@@ -131,9 +102,9 @@ def index():
         return "An error occurred while loading articles", 500
 
 @app.route('/article/<filename>')
-def view_article(filename):
+async def view_article(filename):
     try:
-        article_data = redis_get(f'article:{filename}')
+        article_data = await kv_get(f'article:{filename}')
         if article_data:
             article = json.loads(article_data)
             html = markdown2.markdown(article['content'])
@@ -147,7 +118,7 @@ def view_article(filename):
 
 @app.route('/admin', methods=['GET', 'POST'])
 @login_required
-def admin():
+async def admin():
     if request.method == 'POST':
         title = request.form.get('title', '').strip()
         content = request.form.get('content', '').strip()
@@ -173,7 +144,7 @@ def admin():
                 'title': title,
                 'content': content
             }
-            redis_set(f'article:{article_filename}', json.dumps(article_data))
+            await kv_set(f'article:{article_filename}', json.dumps(article_data))
             flash('Article created successfully!', 'success')
             return redirect(url_for('index'))
         except Exception as e:
@@ -190,7 +161,7 @@ def logout():
 
 @app.route('/edit/<filename>', methods=['GET', 'POST'])
 @login_required
-def edit_article(filename):
+async def edit_article(filename):
     if request.method == 'POST':
         title = request.form.get('title', '').strip()
         content = request.form.get('content', '').strip()
@@ -204,7 +175,7 @@ def edit_article(filename):
                 'title': title,
                 'content': content
             }
-            redis_set(f'article:{filename}', json.dumps(article_data))
+            await kv_set(f'article:{filename}', json.dumps(article_data))
             flash('Article updated successfully!', 'success')
             return redirect(url_for('index'))
         except Exception as e:
@@ -213,7 +184,7 @@ def edit_article(filename):
             return render_template('edit.html', filename=filename, title=title, content=content)
     
     try:
-        article_data = redis_get(f'article:{filename}')
+        article_data = await kv_get(f'article:{filename}')
         if article_data:
             article = json.loads(article_data)
             return render_template('edit.html', filename=filename, title=article['title'], content=article['content'])
@@ -253,9 +224,9 @@ def login():
 
 @app.route('/delete/<filename>')
 @login_required
-def delete_article(filename):
+async def delete_article(filename):
     try:
-        if redis_delete(f'article:{filename}'):
+        if await kv_delete(f'article:{filename}'):
             flash('Article deleted successfully!', 'success')
         else:
             flash('Error deleting the article', 'error')
@@ -284,21 +255,23 @@ def about():
     return render_template('about.html')
 
 @app.route('/health')
-def health_check():
+async def health_check():
     try:
-        redis_client.ping()
-        return jsonify({
-            "status": "OK",
-            "redis": "Connected",
-            "redis_url": redis_url[:10] + "..." + redis_url[-10:]  # Show part of the URL for debugging
-        }), 200
-    except RedisError as e:
-        app.logger.error(f"Redis health check failed: {str(e)}")
+        await kv.set('health_check', 'OK')
+        result = await kv.get('health_check')
+        if result == 'OK':
+            return jsonify({
+                "status": "OK",
+                "kv": "Connected"
+            }), 200
+        else:
+            raise Exception("KV health check failed")
+    except Exception as e:
+        app.logger.error(f"KV health check failed: {str(e)}")
         return jsonify({
             "status": "Error",
-            "redis": "Failed",
-            "error": str(e),
-            "redis_url": redis_url[:10] + "..." + redis_url[-10:]
+            "kv": "Failed",
+            "error": str(e)
         }), 500
 
 def create_admin(username, password):
