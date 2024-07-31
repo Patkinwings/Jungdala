@@ -9,31 +9,40 @@
             {% if current_user.is_authenticated %}
                 <p><a href="{{ url_for('admin') }}">Create New Article</a></p>
             {% endif %}
-            {% if articles %}
+            {% if articles.items %}
                 <ul class="articles-list">
-                    {% for article in articles %}
+                    {% for article in articles.items %}
                         <li>
-                            <a href="{{ url_for('view_article', filename=article.filename) }}">{{ article.title }}</a>
+                            <a href="{{ url_for('view_article', article_id=article.id) }}">{{ article.title }}</a>
                             {% if current_user.is_authenticated %}
                                 <span class="admin-controls">
-                                    <a href="{{ url_for('edit_article', filename=article.filename) }}">[Edit]</a>
-                                    <a href="{{ url_for('delete_article', filename=article.filename) }}" onclick="return confirm('Are you sure you want to delete this article?');">[Delete]</a>
+                                    <a href="{{ url_for('edit_article', article_id=article.id) }}">[Edit]</a>
+                                    <a href="{{ url_for('delete_article', article_id=article.id) }}" onclick="return confirm('Are you sure you want to delete this article?');">[Delete]</a>
                                 </span>
                             {% endif %}
                         </li>
                     {% endfor %}
                 </ul>
                 
-                {% set pages = (total / per_page)|round(0, 'ceil')|int %}
-                {% if pages > 1 %}
+                {% if articles.has_prev or articles.has_next %}
                     <div class="pagination">
-                        {% for p in range(1, pages + 1) %}
-                            {% if p == page %}
-                                <strong>{{ p }}</strong>
+                        {% if articles.has_prev %}
+                            <a href="{{ url_for('index', page=articles.prev_num) }}">Previous</a>
+                        {% endif %}
+                        {% for page_num in articles.iter_pages(left_edge=1, right_edge=1, left_current=1, right_current=2) %}
+                            {% if page_num %}
+                                {% if articles.page == page_num %}
+                                    <strong>{{ page_num }}</strong>
+                                {% else %}
+                                    <a href="{{ url_for('index', page=page_num) }}">{{ page_num }}</a>
+                                {% endif %}
                             {% else %}
-                                <a href="{{ url_for('index', page=p) }}">{{ p }}</a>
+                                ...
                             {% endif %}
                         {% endfor %}
+                        {% if articles.has_next %}
+                            <a href="{{ url_for('index', page=articles.next_num) }}">Next</a>
+                        {% endif %}
                     </div>
                 {% endif %}
             {% else %}

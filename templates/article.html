@@ -1,9 +1,11 @@
 {% extends "base.html" %}
 
-{% block title %} - Article{% endblock %}
+{% block title %} - {{ article.title }}{% endblock %}
 
 {% block content %}
     <div class="article-content centered-content">
+        <h1>{{ article.title }}</h1>
+        <p>Created at: {{ article.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</p>
         {{ content|safe }}
     </div>
 {% endblock %}

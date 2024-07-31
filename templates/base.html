@@ -6,6 +6,7 @@
     <title>MarkPathways{% block title %}{% endblock %}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     {% block head %}{% endblock %}
+    {% block additional_head %}{% endblock %}
 </head>
 <body>
     <div class="page-container">
@@ -16,15 +17,15 @@
                     <span>MarkPathways</span>
                 </h1>
                 <nav>
-                    <button class="menu-toggle" aria-label="Toggle menu">☰</button>
-                    <ul class="nav-list">
+                    <button id="menu-toggle" class="menu-toggle" aria-label="Toggle menu">☰</button>
+                    <ul class="nav-list" name="main-nav">
                         <li><a href="{{ url_for('index') }}">Home</a></li>
                         <li><a href="{{ url_for('about') }}">About</a></li>
                         {% if current_user.is_authenticated %}
                             <li><a href="{{ url_for('admin') }}">Admin</a></li>
                             <li><a href="{{ url_for('logout') }}">Logout</a></li>
                         {% else %}
-                            <li><a href="{{ url_for('login') }}">Admin Login</a></li>
+                            
                         {% endif %}
                     </ul>
                 </nav>
@@ -48,13 +49,16 @@
     </div>
     <script>
         document.addEventListener('DOMContentLoaded', function() {
-            var menuToggle = document.querySelector('.menu-toggle');
+            var menuToggle = document.getElementById('menu-toggle');
             var navList = document.querySelector('.nav-list');
             
             if (menuToggle && navList) {
                 menuToggle.addEventListener('click', function() {
                     navList.classList.toggle('show');
+                    console.log('Menu toggled'); // For debugging
                 });
+            } else {
+                console.log('Menu toggle or nav list not found'); // For debugging
             }
         });
     </script>
