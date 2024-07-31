@@ -8,6 +8,8 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import secrets
 import logging
 from dotenv import load_dotenv
+import redis
+import json
 
 load_dotenv()
 
@@ -26,10 +28,13 @@ login_manager.login_view = 'login'
 
 logging.basicConfig(level=logging.DEBUG)
 
-ARTICLES_DIR = 'articles'
 UPLOAD_FOLDER = os.path.join('static', 'uploads')
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+
+# Connect to Vercel KV (Redis)
+redis_url = os.getenv('KV_URL')
+redis_client = redis.from_url(redis_url)
 
 class Admin(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -41,8 +46,7 @@ class Admin(UserMixin, db.Model):
 
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
-    
-    
+
 @login_manager.user_loader
 def load_user(user_id):
     return Admin.query.get(int(user_id))
@@ -55,17 +59,13 @@ def index():
     app.logger.debug("Rendering index template")
     page = request.args.get('page', 1, type=int)
     per_page = 5  # Number of articles per page
+    
+    # Get all article keys from Redis
+    article_keys = redis_client.keys('article:*')
     articles = []
-    if os.path.exists(ARTICLES_DIR):
-        for filename in os.listdir(ARTICLES_DIR):
-            if filename.endswith('.md'):
-                try:
-                    with open(os.path.join(ARTICLES_DIR, filename), 'r') as f:
-                        content = f.read()
-                        title = content.split('\n')[0].strip('#').strip()
-                        articles.append({'title': title, 'filename': filename[:-3]})
-                except IOError:
-                    app.logger.error(f"Error reading file: {filename}")
+    for key in article_keys:
+        article_data = json.loads(redis_client.get(key))
+        articles.append({'title': article_data['title'], 'filename': key.decode().split(':')[1]})
     
     total = len(articles)
     articles = articles[(page-1)*per_page:page*per_page]
@@ -77,12 +77,12 @@ def index():
 
 @app.route('/article/<filename>')
 def view_article(filename):
-    try:
-        with open(os.path.join(ARTICLES_DIR, f'{filename}.md'), 'r') as f:
-            content = f.read()
-            html = markdown2.markdown(content)
+    article_data = redis_client.get(f'article:{filename}')
+    if article_data:
+        article = json.loads(article_data)
+        html = markdown2.markdown(article['content'])
         return render_template('article.html', content=html)
-    except IOError:
+    else:
         flash("Article not found", 'error')
         return redirect(url_for('index'))
 
@@ -108,13 +108,13 @@ def admin():
                     flash(f'Error uploading file: {str(e)}', 'error')
                     return render_template('admin.html')
         
-        article_filename = title.lower().replace(' ', '-') + '.md'
-        try:
-            with open(os.path.join(ARTICLES_DIR, article_filename), 'w') as f:
-                f.write(f'# {title}\n\n{content}')
-            flash('Article created successfully!', 'success')
-        except IOError:
-            flash('Error saving the article', 'error')
+        article_filename = title.lower().replace(' ', '-')
+        article_data = {
+            'title': title,
+            'content': content
+        }
+        redis_client.set(f'article:{article_filename}', json.dumps(article_data))
+        flash('Article created successfully!', 'success')
         return redirect(url_for('index'))
     return render_template('admin.html')
 
@@ -135,21 +135,19 @@ def edit_article(filename):
             flash('Title and content are required', 'error')
             return render_template('edit.html', filename=filename, title=title, content=content)
         
-        try:
-            with open(os.path.join(ARTICLES_DIR, f'{filename}.md'), 'w') as f:
-                f.write(f'# {title}\n\n{content}')
-            flash('Article updated successfully!', 'success')
-        except IOError:
-            flash('Error updating the article', 'error')
+        article_data = {
+            'title': title,
+            'content': content
+        }
+        redis_client.set(f'article:{filename}', json.dumps(article_data))
+        flash('Article updated successfully!', 'success')
         return redirect(url_for('index'))
     
-    try:
-        with open(os.path.join(ARTICLES_DIR, f'{filename}.md'), 'r') as f:
-            content = f.read()
-            title = content.split('\n')[0].strip('#').strip()
-            body = '\n'.join(content.split('\n')[2:])
-        return render_template('edit.html', filename=filename, title=title, content=body)
-    except IOError:
+    article_data = redis_client.get(f'article:{filename}')
+    if article_data:
+        article = json.loads(article_data)
+        return render_template('edit.html', filename=filename, title=article['title'], content=article['content'])
+    else:
         flash('Article not found', 'error')
         return redirect(url_for('index'))
 
@@ -182,10 +180,9 @@ def login():
 @app.route('/delete/<filename>')
 @login_required
 def delete_article(filename):
-    try:
-        os.remove(os.path.join(ARTICLES_DIR, f'{filename}.md'))
+    if redis_client.delete(f'article:{filename}'):
         flash('Article deleted successfully!', 'success')
-    except OSError:
+    else:
         flash('Error deleting the article', 'error')
     return redirect(url_for('index'))
 
@@ -233,16 +230,7 @@ def create_admin(username, password):
     except Exception as e:
         app.logger.error(f"Error creating admin user: {str(e)}")
         db.session.rollback()
-        
-def update_password_hashes():
-    with app.app_context():
-        admins = Admin.query.all()
-        for admin in admins:
-            if admin.password_hash.startswith('scrypt:'):
-                # You'll need to set a temporary password here
-                admin.set_password('jungdala')
-        db.session.commit()
-        
+
 def reset_database():
     with app.app_context():
         db.drop_all()
@@ -252,7 +240,6 @@ def reset_database():
 
 if __name__ == '__main__':
     reset_database()
-    os.makedirs(ARTICLES_DIR, exist_ok=True)
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
     app.logger.info("Starting server on http://localhost:5001")
     app.run(debug=True, host='localhost', port=5001)
