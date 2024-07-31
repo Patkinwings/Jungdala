@@ -8,7 +8,8 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import secrets
 import logging
 from dotenv import load_dotenv
-import redis
+from redis import ConnectionPool, Redis
+from redis.exceptions import RedisError
 import json
 
 load_dotenv()
@@ -34,7 +35,8 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 
 # Connect to Vercel KV (Redis)
 redis_url = os.getenv('KV_URL')
-redis_client = redis.from_url(redis_url)
+redis_pool = ConnectionPool.from_url(redis_url)
+redis_client = Redis(connection_pool=redis_pool)
 
 class Admin(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -54,37 +56,75 @@ def load_user(user_id):
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+def redis_get(key):
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            return redis_client.get(key)
+        except RedisError as e:
+            app.logger.error(f"Redis error on attempt {attempt + 1}: {str(e)}")
+            if attempt == max_retries - 1:
+                raise
+
+def redis_set(key, value):
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            return redis_client.set(key, value)
+        except RedisError as e:
+            app.logger.error(f"Redis error on attempt {attempt + 1}: {str(e)}")
+            if attempt == max_retries - 1:
+                raise
+
+def redis_delete(key):
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            return redis_client.delete(key)
+        except RedisError as e:
+            app.logger.error(f"Redis error on attempt {attempt + 1}: {str(e)}")
+            if attempt == max_retries - 1:
+                raise
+
 @app.route('/')
 def index():
     app.logger.debug("Rendering index template")
     page = request.args.get('page', 1, type=int)
     per_page = 5  # Number of articles per page
     
-    # Get all article keys from Redis
-    article_keys = redis_client.keys('article:*')
-    articles = []
-    for key in article_keys:
-        article_data = json.loads(redis_client.get(key))
-        articles.append({'title': article_data['title'], 'filename': key.decode().split(':')[1]})
-    
-    total = len(articles)
-    articles = articles[(page-1)*per_page:page*per_page]
-    
-    app.logger.debug(f"Articles: {articles}")
-    app.logger.debug(f"Page: {page}, Per page: {per_page}, Total: {total}")
-    
-    return render_template('index.html', articles=articles, page=page, per_page=per_page, total=total)
+    try:
+        # Get all article keys from Redis
+        article_keys = redis_client.keys('article:*')
+        articles = []
+        for key in article_keys:
+            article_data = json.loads(redis_get(key))
+            articles.append({'title': article_data['title'], 'filename': key.decode().split(':')[1]})
+        
+        total = len(articles)
+        articles = articles[(page-1)*per_page:page*per_page]
+        
+        app.logger.debug(f"Articles: {articles}")
+        app.logger.debug(f"Page: {page}, Per page: {per_page}, Total: {total}")
+        
+        return render_template('index.html', articles=articles, page=page, per_page=per_page, total=total)
+    except Exception as e:
+        app.logger.error(f"Error in index route: {str(e)}")
+        return "An error occurred while loading articles", 500
 
 @app.route('/article/<filename>')
 def view_article(filename):
-    article_data = redis_client.get(f'article:{filename}')
-    if article_data:
-        article = json.loads(article_data)
-        html = markdown2.markdown(article['content'])
-        return render_template('article.html', content=html)
-    else:
-        flash("Article not found", 'error')
-        return redirect(url_for('index'))
+    try:
+        article_data = redis_get(f'article:{filename}')
+        if article_data:
+            article = json.loads(article_data)
+            html = markdown2.markdown(article['content'])
+            return render_template('article.html', content=html)
+        else:
+            flash("Article not found", 'error')
+            return redirect(url_for('index'))
+    except Exception as e:
+        app.logger.error(f"Error viewing article: {str(e)}")
+        return "An error occurred while viewing the article", 500
 
 @app.route('/admin', methods=['GET', 'POST'])
 @login_required
@@ -108,14 +148,19 @@ def admin():
                     flash(f'Error uploading file: {str(e)}', 'error')
                     return render_template('admin.html')
         
-        article_filename = title.lower().replace(' ', '-')
-        article_data = {
-            'title': title,
-            'content': content
-        }
-        redis_client.set(f'article:{article_filename}', json.dumps(article_data))
-        flash('Article created successfully!', 'success')
-        return redirect(url_for('index'))
+        try:
+            article_filename = title.lower().replace(' ', '-')
+            article_data = {
+                'title': title,
+                'content': content
+            }
+            redis_set(f'article:{article_filename}', json.dumps(article_data))
+            flash('Article created successfully!', 'success')
+            return redirect(url_for('index'))
+        except Exception as e:
+            app.logger.error(f"Error creating article: {str(e)}")
+            flash('Error creating article', 'error')
+            return render_template('admin.html')
     return render_template('admin.html')
 
 @app.route('/logout')
@@ -135,20 +180,30 @@ def edit_article(filename):
             flash('Title and content are required', 'error')
             return render_template('edit.html', filename=filename, title=title, content=content)
         
-        article_data = {
-            'title': title,
-            'content': content
-        }
-        redis_client.set(f'article:{filename}', json.dumps(article_data))
-        flash('Article updated successfully!', 'success')
-        return redirect(url_for('index'))
+        try:
+            article_data = {
+                'title': title,
+                'content': content
+            }
+            redis_set(f'article:{filename}', json.dumps(article_data))
+            flash('Article updated successfully!', 'success')
+            return redirect(url_for('index'))
+        except Exception as e:
+            app.logger.error(f"Error updating article: {str(e)}")
+            flash('Error updating article', 'error')
+            return render_template('edit.html', filename=filename, title=title, content=content)
     
-    article_data = redis_client.get(f'article:{filename}')
-    if article_data:
-        article = json.loads(article_data)
-        return render_template('edit.html', filename=filename, title=article['title'], content=article['content'])
-    else:
-        flash('Article not found', 'error')
+    try:
+        article_data = redis_get(f'article:{filename}')
+        if article_data:
+            article = json.loads(article_data)
+            return render_template('edit.html', filename=filename, title=article['title'], content=article['content'])
+        else:
+            flash('Article not found', 'error')
+            return redirect(url_for('index'))
+    except Exception as e:
+        app.logger.error(f"Error fetching article for editing: {str(e)}")
+        flash('Error fetching article', 'error')
         return redirect(url_for('index'))
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -180,9 +235,13 @@ def login():
 @app.route('/delete/<filename>')
 @login_required
 def delete_article(filename):
-    if redis_client.delete(f'article:{filename}'):
-        flash('Article deleted successfully!', 'success')
-    else:
+    try:
+        if redis_delete(f'article:{filename}'):
+            flash('Article deleted successfully!', 'success')
+        else:
+            flash('Error deleting the article', 'error')
+    except Exception as e:
+        app.logger.error(f"Error deleting article: {str(e)}")
         flash('Error deleting the article', 'error')
     return redirect(url_for('index'))
 
@@ -204,6 +263,15 @@ def handle_exception(e):
 @app.route('/about')
 def about():
     return render_template('about.html')
+
+@app.route('/health')
+def health_check():
+    try:
+        redis_client.ping()
+        return "OK", 200
+    except RedisError as e:
+        app.logger.error(f"Redis health check failed: {str(e)}")
+        return "Redis connection failed", 500
 
 def create_admin(username, password):
     try:
