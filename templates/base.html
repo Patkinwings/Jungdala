@@ -6,7 +6,6 @@
     <title>MarkPathways{% block title %}{% endblock %}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     {% block head %}{% endblock %}
-    {% block additional_head %}{% endblock %}
 </head>
 <body>
     <div class="page-container">
@@ -17,8 +16,8 @@
                     <span>MarkPathways</span>
                 </h1>
                 <nav>
-                    <button id="menu-toggle" class="menu-toggle" aria-label="Toggle menu">☰</button>
-                    <ul class="nav-list" name="main-nav">
+                    <button class="menu-toggle" aria-label="Toggle menu">☰</button>
+                    <ul class="nav-list">
                         <li><a href="{{ url_for('index') }}">Home</a></li>
                         <li><a href="{{ url_for('about') }}">About</a></li>
                         {% if current_user.is_authenticated %}
@@ -49,7 +48,7 @@
     </div>
     <script>
         document.addEventListener('DOMContentLoaded', function() {
-            var menuToggle = document.getElementById('menu-toggle');
+            var menuToggle = document.querySelector('.menu-toggle');
             var navList = document.querySelector('.nav-list');
             
             if (menuToggle && navList) {
@@ -63,5 +62,6 @@
         });
     </script>
     {% block scripts %}{% endblock %}
+
 </body>
 </html>

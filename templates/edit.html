@@ -12,11 +12,11 @@
     <form method="POST">
         <div>
             <label for="title">Article Title:</label>
-            <input type="text" id="title" name="title" value="{{ article.title }}" required>
+            <input type="text" id="title" name="title" value="{{ title }}" required>
         </div>
         <div>
             <label for="content">Article Content:</label>
-            <textarea id="content" name="content" required>{{ article.content }}</textarea>
+            <textarea id="content" name="content" required>{{ content }}</textarea>
         </div>
         <button type="submit">Update Article</button>
     </form>

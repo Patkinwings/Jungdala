@@ -8,14 +8,6 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import secrets
 import logging
 from dotenv import load_dotenv
-from datetime import timedelta, datetime
-import sys
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.engine.url import make_url
-
-print("Python version:", sys.version)
-print("Python path:", sys.path)
 
 load_dotenv()
 
@@ -24,57 +16,20 @@ app = Flask(__name__,
             static_folder='static',
             template_folder='templates')
 app.secret_key = os.getenv('SECRET_KEY', secrets.token_hex(16))
-app.config['DEBUG'] = False  # Disable debug mode for production
-
-DATABASE_URL = os.getenv('DATABASE_URL')
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-
-# Remove sslmode from the URL if it's there
-if 'sslmode' in DATABASE_URL:
-    DATABASE_URL = DATABASE_URL.split('?')[0]
-
-url = make_url(DATABASE_URL)
-engine = create_engine(
-    url,
-    connect_args={
-        "sslmode": "require",
-        "ssl": {
-            "ssl_ca": "/etc/ssl/certs/ca-certificates.crt",
-        }
-    }
-)
-
-app.config['SQLALCHEMY_DATABASE_URI'] = str(url)
+app.config['DEBUG'] = True  # Enable debug mode
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///admin.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-# Session configuration
-app.config['REMEMBER_COOKIE_DURATION'] = timedelta(days=30)
-app.config['SESSION_PERMANENT'] = True
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+logging.basicConfig(level=logging.DEBUG)
 
-logging.basicConfig(level=logging.INFO)
-
+ARTICLES_DIR = 'articles'
 UPLOAD_FOLDER = os.path.join('static', 'uploads')
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
-
-@app.after_request
-def add_csp_header(response):
-    csp = "default-src 'self' https://cdn.tiny.cloud; " \
-          "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tiny.cloud; " \
-          "style-src 'self' 'unsafe-inline' https://cdn.tiny.cloud; " \
-          "img-src 'self' data: blob: https://cdn.tiny.cloud https://sp.tinymce.com; " \
-          "font-src 'self' https://cdn.tiny.cloud; " \
-          "connect-src 'self' https://cdn.tiny.cloud https://sp.tinymce.com;"
-    response.headers['Content-Security-Policy'] = csp
-    return response
 
 class Admin(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -86,13 +41,8 @@ class Admin(UserMixin, db.Model):
 
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
-
-class Article(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    title = db.Column(db.String(200), nullable=False)
-    content = db.Column(db.Text, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
+    
+    
 @login_manager.user_loader
 def load_user(user_id):
     return Admin.query.get(int(user_id))
@@ -102,17 +52,39 @@ def allowed_file(filename):
 
 @app.route('/')
 def index():
-    app.logger.info("Rendering index template")
+    app.logger.debug("Rendering index template")
     page = request.args.get('page', 1, type=int)
     per_page = 5  # Number of articles per page
-    articles = Article.query.order_by(Article.created_at.desc()).paginate(page=page, per_page=per_page)
-    return render_template('index.html', articles=articles)
+    articles = []
+    if os.path.exists(ARTICLES_DIR):
+        for filename in os.listdir(ARTICLES_DIR):
+            if filename.endswith('.md'):
+                try:
+                    with open(os.path.join(ARTICLES_DIR, filename), 'r') as f:
+                        content = f.read()
+                        title = content.split('\n')[0].strip('#').strip()
+                        articles.append({'title': title, 'filename': filename[:-3]})
+                except IOError:
+                    app.logger.error(f"Error reading file: {filename}")
+    
+    total = len(articles)
+    articles = articles[(page-1)*per_page:page*per_page]
+    
+    app.logger.debug(f"Articles: {articles}")
+    app.logger.debug(f"Page: {page}, Per page: {per_page}, Total: {total}")
+    
+    return render_template('index.html', articles=articles, page=page, per_page=per_page, total=total)
 
-@app.route('/article/<int:article_id>')
-def view_article(article_id):
-    article = Article.query.get_or_404(article_id)
-    html_content = markdown2.markdown(article.content)
-    return render_template('article.html', article=article, content=html_content)
+@app.route('/article/<filename>')
+def view_article(filename):
+    try:
+        with open(os.path.join(ARTICLES_DIR, f'{filename}.md'), 'r') as f:
+            content = f.read()
+            html = markdown2.markdown(content)
+        return render_template('article.html', content=html)
+    except IOError:
+        flash("Article not found", 'error')
+        return redirect(url_for('index'))
 
 @app.route('/admin', methods=['GET', 'POST'])
 @login_required
@@ -136,16 +108,13 @@ def admin():
                     flash(f'Error uploading file: {str(e)}', 'error')
                     return render_template('admin.html')
         
-        new_article = Article(title=title, content=content)
-        db.session.add(new_article)
+        article_filename = title.lower().replace(' ', '-') + '.md'
         try:
-            db.session.commit()
+            with open(os.path.join(ARTICLES_DIR, article_filename), 'w') as f:
+                f.write(f'# {title}\n\n{content}')
             flash('Article created successfully!', 'success')
-        except Exception as e:
-            db.session.rollback()
-            flash(f'Error creating article: {str(e)}', 'error')
-            return render_template('admin.html')
-        
+        except IOError:
+            flash('Error saving the article', 'error')
         return redirect(url_for('index'))
     return render_template('admin.html')
 
@@ -155,74 +124,69 @@ def logout():
     logout_user()
     return redirect(url_for('index'))
 
-@app.route('/edit/<int:article_id>', methods=['GET', 'POST'])
+@app.route('/edit/<filename>', methods=['GET', 'POST'])
 @login_required
-def edit_article(article_id):
-    article = Article.query.get_or_404(article_id)
-    
+def edit_article(filename):
     if request.method == 'POST':
         title = request.form.get('title', '').strip()
         content = request.form.get('content', '').strip()
         
         if not title or not content:
             flash('Title and content are required', 'error')
-            return render_template('edit.html', article=article)
-        
-        article.title = title
-        article.content = content
+            return render_template('edit.html', filename=filename, title=title, content=content)
         
         try:
-            db.session.commit()
+            with open(os.path.join(ARTICLES_DIR, f'{filename}.md'), 'w') as f:
+                f.write(f'# {title}\n\n{content}')
             flash('Article updated successfully!', 'success')
-        except Exception as e:
-            db.session.rollback()
-            flash(f'Error updating article: {str(e)}', 'error')
-            return render_template('edit.html', article=article)
-        
-        return redirect(url_for('view_article', article_id=article.id))
+        except IOError:
+            flash('Error updating the article', 'error')
+        return redirect(url_for('index'))
     
-    return render_template('edit.html', article=article)
+    try:
+        with open(os.path.join(ARTICLES_DIR, f'{filename}.md'), 'r') as f:
+            content = f.read()
+            title = content.split('\n')[0].strip('#').strip()
+            body = '\n'.join(content.split('\n')[2:])
+        return render_template('edit.html', filename=filename, title=title, content=body)
+    except IOError:
+        flash('Article not found', 'error')
+        return redirect(url_for('index'))
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if current_user.is_authenticated:
         return redirect(url_for('admin'))
     
-    app.logger.info("Login route accessed")
+    app.logger.debug("Login route accessed")
     if request.method == 'POST':
-        app.logger.info("POST request received")
+        app.logger.debug("POST request received")
         username = request.form.get('username')
         password = request.form.get('password')
-        app.logger.info(f"Login attempt: username='{username}'")
-        
+        app.logger.debug(f"Login attempt: username='{username}', password='{password}'")
         admin = Admin.query.filter_by(username=username).first()
-        
         if admin:
-            app.logger.info(f"Admin found: {admin.username}")
+            app.logger.debug(f"Admin found: {admin.username}")
             if admin.check_password(password):
-                app.logger.info("Password is correct")
-                login_user(admin, remember=True)
+                app.logger.debug("Password is correct")
+                login_user(admin)
                 next_page = request.args.get('next')
                 return redirect(next_page or url_for('admin'))
             else:
-                app.logger.info("Password is incorrect")
+                app.logger.debug("Password is incorrect")
         else:
-            app.logger.info("Admin not found")
+            app.logger.debug("Admin not found")
         flash('Invalid username or password', 'error')
     return render_template('login.html')
 
-@app.route('/delete/<int:article_id>')
+@app.route('/delete/<filename>')
 @login_required
-def delete_article(article_id):
-    article = Article.query.get_or_404(article_id)
-    
+def delete_article(filename):
     try:
-        db.session.delete(article)
-        db.session.commit()
+        os.remove(os.path.join(ARTICLES_DIR, f'{filename}.md'))
         flash('Article deleted successfully!', 'success')
-    except Exception as e:
-        db.session.rollback()
-        flash(f'Error deleting the article: {str(e)}', 'error')
+    except OSError:
+        flash('Error deleting the article', 'error')
     return redirect(url_for('index'))
 
 @app.errorhandler(500)
@@ -237,7 +201,7 @@ def page_not_found(e):
 
 @app.errorhandler(Exception)
 def handle_exception(e):
-    app.logger.error(f"Unhandled exception: {str(e)}", exc_info=True)
+    app.logger.error(f"Unhandled exception: {str(e)}")
     return "An error occurred", 500
 
 @app.route('/about')
@@ -247,30 +211,48 @@ def about():
 def create_admin(username, password):
     try:
         admin = Admin.query.filter_by(username=username).first()
-        
         if admin is None:
             admin = Admin(username=username)
             db.session.add(admin)
         admin.set_password(password)
         db.session.commit()
-        
         app.logger.info(f"Admin user '{username}' created/updated successfully.")
+        app.logger.info(f"Password hash: {admin.password_hash}")
         
         # Verify the admin exists and password works
         admin = Admin.query.filter_by(username=username).first()
-        
         if admin and admin.check_password(password):
             app.logger.info("Admin credentials are correct.")
         else:
             app.logger.error("Failed to verify admin credentials.")
+        
+        # Print all users in the database
+        all_users = Admin.query.all()
+        for user in all_users:
+            app.logger.info(f"User: {user.username}, Password hash: {user.password_hash}")
     except Exception as e:
         app.logger.error(f"Error creating admin user: {str(e)}")
         db.session.rollback()
-
-if __name__ == '__main__':
+        
+def update_password_hashes():
     with app.app_context():
+        admins = Admin.query.all()
+        for admin in admins:
+            if admin.password_hash.startswith('scrypt:'):
+                # You'll need to set a temporary password here
+                admin.set_password('jungdala')
+        db.session.commit()
+        
+def reset_database():
+    with app.app_context():
+        db.drop_all()
         db.create_all()
         create_admin('admin', 'Jungdala')
+        app.logger.info("Database reset and admin user created")
+
+if __name__ == '__main__':
+    reset_database()
+    os.makedirs(ARTICLES_DIR, exist_ok=True)
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
     app.logger.info("Starting server on http://localhost:5001")
-    app.run(debug=False, host='localhost', port=5001)
+    app.run(debug=True, host='localhost', port=5001)
