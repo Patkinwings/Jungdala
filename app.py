@@ -8,7 +8,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import secrets
 import logging
 from dotenv import load_dotenv
-from vercel_kv import VercelKV
+from redis import Redis
 import json
 
 load_dotenv()
@@ -32,7 +32,8 @@ UPLOAD_FOLDER = os.path.join('static', 'uploads')
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 
-kv = VercelKV()
+redis_url = os.getenv('KV_URL')
+redis_client = Redis.from_url(redis_url)
 
 class Admin(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -52,42 +53,42 @@ def load_user(user_id):
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-async def kv_get(key):
+def kv_get(key):
     try:
-        return await kv.get(key)
+        return redis_client.get(key)
     except Exception as e:
         app.logger.error(f"KV error: {str(e)}")
         raise
 
-async def kv_set(key, value):
+def kv_set(key, value):
     try:
-        return await kv.set(key, value)
+        return redis_client.set(key, value)
     except Exception as e:
         app.logger.error(f"KV error: {str(e)}")
         raise
 
-async def kv_delete(key):
+def kv_delete(key):
     try:
-        return await kv.delete(key)
+        return redis_client.delete(key)
     except Exception as e:
         app.logger.error(f"KV error: {str(e)}")
         raise
 
 @app.route('/')
-async def index():
+def index():
     app.logger.debug("Rendering index template")
     page = request.args.get('page', 1, type=int)
     per_page = 5  # Number of articles per page
     
     try:
         app.logger.debug("Fetching article keys from KV")
-        article_keys = await kv.keys('article:*')
+        article_keys = redis_client.keys('article:*')
         app.logger.debug(f"Found {len(article_keys)} article keys")
         
         articles = []
         for key in article_keys:
             app.logger.debug(f"Fetching article data for key: {key}")
-            article_data = json.loads(await kv_get(key))
+            article_data = json.loads(kv_get(key))
             articles.append({'title': article_data['title'], 'filename': key.split(':')[1]})
         
         total = len(articles)
@@ -102,9 +103,9 @@ async def index():
         return "An error occurred while loading articles", 500
 
 @app.route('/article/<filename>')
-async def view_article(filename):
+def view_article(filename):
     try:
-        article_data = await kv_get(f'article:{filename}')
+        article_data = kv_get(f'article:{filename}')
         if article_data:
             article = json.loads(article_data)
             html = markdown2.markdown(article['content'])
@@ -118,7 +119,7 @@ async def view_article(filename):
 
 @app.route('/admin', methods=['GET', 'POST'])
 @login_required
-async def admin():
+def admin():
     if request.method == 'POST':
         title = request.form.get('title', '').strip()
         content = request.form.get('content', '').strip()
@@ -144,7 +145,7 @@ async def admin():
                 'title': title,
                 'content': content
             }
-            await kv_set(f'article:{article_filename}', json.dumps(article_data))
+            kv_set(f'article:{article_filename}', json.dumps(article_data))
             flash('Article created successfully!', 'success')
             return redirect(url_for('index'))
         except Exception as e:
@@ -161,7 +162,7 @@ def logout():
 
 @app.route('/edit/<filename>', methods=['GET', 'POST'])
 @login_required
-async def edit_article(filename):
+def edit_article(filename):
     if request.method == 'POST':
         title = request.form.get('title', '').strip()
         content = request.form.get('content', '').strip()
@@ -175,7 +176,7 @@ async def edit_article(filename):
                 'title': title,
                 'content': content
             }
-            await kv_set(f'article:{filename}', json.dumps(article_data))
+            kv_set(f'article:{filename}', json.dumps(article_data))
             flash('Article updated successfully!', 'success')
             return redirect(url_for('index'))
         except Exception as e:
@@ -184,7 +185,7 @@ async def edit_article(filename):
             return render_template('edit.html', filename=filename, title=title, content=content)
     
     try:
-        article_data = await kv_get(f'article:{filename}')
+        article_data = kv_get(f'article:{filename}')
         if article_data:
             article = json.loads(article_data)
             return render_template('edit.html', filename=filename, title=article['title'], content=article['content'])
@@ -224,9 +225,9 @@ def login():
 
 @app.route('/delete/<filename>')
 @login_required
-async def delete_article(filename):
+def delete_article(filename):
     try:
-        if await kv_delete(f'article:{filename}'):
+        if kv_delete(f'article:{filename}'):
             flash('Article deleted successfully!', 'success')
         else:
             flash('Error deleting the article', 'error')
@@ -255,11 +256,11 @@ def about():
     return render_template('about.html')
 
 @app.route('/health')
-async def health_check():
+def health_check():
     try:
-        await kv.set('health_check', 'OK')
-        result = await kv.get('health_check')
-        if result == 'OK':
+        redis_client.set('health_check', 'OK')
+        result = redis_client.get('health_check')
+        if result == b'OK':
             return jsonify({
                 "status": "OK",
                 "kv": "Connected"
