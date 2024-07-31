@@ -16,10 +16,5 @@
   ],
   "env": {
     "FLASK_ENV": "production"
-  },
-  "build": {
-    "env": {
-      "PIP_EXTRA_INDEX_URL": ""
-    }
   }
 }
