@@ -12,6 +12,7 @@ from datetime import timedelta, datetime
 import sys
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.engine.url import make_url
 
 print("Python version:", sys.version)
 print("Python path:", sys.path)
@@ -27,16 +28,24 @@ app.config['DEBUG'] = False  # Disable debug mode for production
 
 DATABASE_URL = os.getenv('DATABASE_URL')
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+pg8000://", 1)
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
-app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    "connect_args": {
+# Remove sslmode from the URL if it's there
+if 'sslmode' in DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.split('?')[0]
+
+url = make_url(DATABASE_URL)
+engine = create_engine(
+    url,
+    connect_args={
+        "sslmode": "require",
         "ssl": {
             "ssl_ca": "/etc/ssl/certs/ca-certificates.crt",
         }
     }
-}
+)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = str(url)
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Session configuration
@@ -47,12 +56,6 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
-
-engine = create_engine(DATABASE_URL, connect_args={
-    "ssl": {
-        "ssl_ca": "/etc/ssl/certs/ca-certificates.crt",
-    }
-})
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
