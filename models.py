@@ -2,6 +2,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from flask_login import UserMixin
 from bson import ObjectId
 from datetime import datetime
+from bson.errors import InvalidId
 
 class User(UserMixin):
     def __init__(self, username, password_hash=None, _id=None):
@@ -22,10 +23,16 @@ class User(UserMixin):
     def from_db(user_data):
         if not user_data:
             return None
+        user_id = user_data.get('_id')
+        if isinstance(user_id, str):
+            try:
+                user_id = ObjectId(user_id)
+            except InvalidId:
+                return None
         return User(
             username=user_data['username'],
             password_hash=user_data['password_hash'],
-            _id=user_data['_id']
+            _id=user_id
         )
 
     def to_db(self):
@@ -46,12 +53,18 @@ class Article:
     def from_db(article_data):
         if not article_data:
             return None
+        article_id = article_data.get('_id')
+        if isinstance(article_id, str):
+            try:
+                article_id = ObjectId(article_id)
+            except InvalidId:
+                return None
         return Article(
             title=article_data['title'],
             content=article_data['content'],
-            created_at=article_data['created_at'],
-            updated_at=article_data['updated_at'],
-            _id=article_data['_id']
+            created_at=article_data.get('created_at', datetime.utcnow()),
+            updated_at=article_data.get('updated_at', datetime.utcnow()),
+            _id=article_id
         )
 
     def to_db(self):
@@ -66,3 +79,6 @@ class Article:
         self.title = title
         self.content = content
         self.updated_at = datetime.utcnow()
+
+    def get_id(self):
+        return str(self._id)

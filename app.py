@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 from bson.objectid import ObjectId
 from models import User, Article
+from bson.errors import InvalidId
 
 load_dotenv()
 
@@ -53,6 +54,8 @@ def load_user(user_id):
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+
+
 @app.route('/')
 def index():
     app.logger.debug("Rendering index template")
@@ -61,8 +64,13 @@ def index():
     
     total = articles_collection.count_documents({})
     skip = (page - 1) * per_page
-    articles_data = list(articles_collection.find().sort('created_at', -1).skip(skip).limit(per_page))
-    articles = [Article.from_db(article_data) for article_data in articles_data]
+    
+    try:
+        articles_data = list(articles_collection.find().sort('created_at', -1).skip(skip).limit(per_page))
+        articles = [Article.from_db(article_data) for article_data in articles_data]
+    except InvalidId:
+        articles = []
+        app.logger.error("Invalid ObjectId encountered in article query")
     
     app.logger.debug(f"Articles: {articles}")
     app.logger.debug(f"Page: {page}, Per page: {per_page}, Total: {total}")
