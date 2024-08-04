@@ -1,8 +1,6 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, abort
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
-from pymongo.mongo_client import MongoClient
-from pymongo.server_api import ServerApi
-from bson.objectid import ObjectId
+from flask_sqlalchemy import SQLAlchemy
 import os
 import markdown2
 from werkzeug.utils import secure_filename
@@ -18,44 +16,36 @@ app = Flask(__name__,
             static_folder='static',
             template_folder='templates')
 app.secret_key = os.getenv('SECRET_KEY', secrets.token_hex(16))
-app.config['DEBUG'] = True
+app.config['DEBUG'] = True  # Enable debug mode
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///admin.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+login_manager = LoginManager(app)
+login_manager.login_view = 'login'
 
 logging.basicConfig(level=logging.DEBUG)
 
+ARTICLES_DIR = 'articles'
 UPLOAD_FOLDER = os.path.join('static', 'uploads')
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 
-# MongoDB setup
-uri = os.getenv('MONGO_URI', "mongodb+srv://markspathways:emQFI7MXf6ZiHngL@cluster0.whf8u94.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0")
-client = MongoClient(uri, server_api=ServerApi('1'))
-db = client.get_database('your_database_name')
-articles_collection = db.articles
-users_collection = db.users
+class Admin(UserMixin, db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    password_hash = db.Column(db.String(255), nullable=False)
 
-# Test MongoDB connection
-try:
-    client.admin.command('ping')
-    print("Pinged your deployment. You successfully connected to MongoDB!")
-except Exception as e:
-    print(e)
-
-login_manager = LoginManager(app)
-login_manager.login_view = 'login'
-
-class User(UserMixin):
-    def __init__(self, user_data):
-        self.id = str(user_data['_id'])
-        self.username = user_data['username']
-        self.password_hash = user_data['password_hash']
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password, method='pbkdf2:sha256')
 
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
-
+    
+    
 @login_manager.user_loader
 def load_user(user_id):
-    user_data = users_collection.find_one({'_id': ObjectId(user_id)})
-    return User(user_data) if user_data else None
+    return Admin.query.get(int(user_id))
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -64,25 +54,37 @@ def allowed_file(filename):
 def index():
     app.logger.debug("Rendering index template")
     page = request.args.get('page', 1, type=int)
-    per_page = 5
-    skip = (page - 1) * per_page
+    per_page = 5  # Number of articles per page
+    articles = []
+    if os.path.exists(ARTICLES_DIR):
+        for filename in os.listdir(ARTICLES_DIR):
+            if filename.endswith('.md'):
+                try:
+                    with open(os.path.join(ARTICLES_DIR, filename), 'r') as f:
+                        content = f.read()
+                        title = content.split('\n')[0].strip('#').strip()
+                        articles.append({'title': title, 'filename': filename[:-3]})
+                except IOError:
+                    app.logger.error(f"Error reading file: {filename}")
     
-    articles = list(articles_collection.find().skip(skip).limit(per_page))
-    total = articles_collection.count_documents({})
+    total = len(articles)
+    articles = articles[(page-1)*per_page:page*per_page]
     
     app.logger.debug(f"Articles: {articles}")
     app.logger.debug(f"Page: {page}, Per page: {per_page}, Total: {total}")
     
     return render_template('index.html', articles=articles, page=page, per_page=per_page, total=total)
 
-@app.route('/article/<article_id>')
-def view_article(article_id):
-    article = articles_collection.find_one({'_id': ObjectId(article_id)})
-    if article:
-        content_html = markdown2.markdown(article['content'])
-        return render_template('article.html', article=article, content=content_html)
-    flash("Article not found", 'error')
-    return redirect(url_for('index'))
+@app.route('/article/<filename>')
+def view_article(filename):
+    try:
+        with open(os.path.join(ARTICLES_DIR, f'{filename}.md'), 'r') as f:
+            content = f.read()
+            html = markdown2.markdown(content)
+        return render_template('article.html', content=html)
+    except IOError:
+        flash("Article not found", 'error')
+        return redirect(url_for('index'))
 
 @app.route('/admin', methods=['GET', 'POST'])
 @login_required
@@ -106,12 +108,13 @@ def admin():
                     flash(f'Error uploading file: {str(e)}', 'error')
                     return render_template('admin.html')
         
-        article = {
-            'title': title,
-            'content': content
-        }
-        articles_collection.insert_one(article)
-        flash('Article created successfully!', 'success')
+        article_filename = title.lower().replace(' ', '-') + '.md'
+        try:
+            with open(os.path.join(ARTICLES_DIR, article_filename), 'w') as f:
+                f.write(f'# {title}\n\n{content}')
+            flash('Article created successfully!', 'success')
+        except IOError:
+            flash('Error saving the article', 'error')
         return redirect(url_for('index'))
     return render_template('admin.html')
 
@@ -121,30 +124,34 @@ def logout():
     logout_user()
     return redirect(url_for('index'))
 
-@app.route('/edit/<article_id>', methods=['GET', 'POST'])
+@app.route('/edit/<filename>', methods=['GET', 'POST'])
 @login_required
-def edit_article(article_id):
-    article = articles_collection.find_one({'_id': ObjectId(article_id)})
-    if not article:
-        flash('Article not found', 'error')
-        return redirect(url_for('index'))
-    
+def edit_article(filename):
     if request.method == 'POST':
         title = request.form.get('title', '').strip()
         content = request.form.get('content', '').strip()
         
         if not title or not content:
             flash('Title and content are required', 'error')
-            return render_template('edit.html', article=article)
+            return render_template('edit.html', filename=filename, title=title, content=content)
         
-        articles_collection.update_one(
-            {'_id': ObjectId(article_id)},
-            {'$set': {'title': title, 'content': content}}
-        )
-        flash('Article updated successfully!', 'success')
+        try:
+            with open(os.path.join(ARTICLES_DIR, f'{filename}.md'), 'w') as f:
+                f.write(f'# {title}\n\n{content}')
+            flash('Article updated successfully!', 'success')
+        except IOError:
+            flash('Error updating the article', 'error')
         return redirect(url_for('index'))
     
-    return render_template('edit.html', article=article)
+    try:
+        with open(os.path.join(ARTICLES_DIR, f'{filename}.md'), 'r') as f:
+            content = f.read()
+            title = content.split('\n')[0].strip('#').strip()
+            body = '\n'.join(content.split('\n')[2:])
+        return render_template('edit.html', filename=filename, title=title, content=body)
+    except IOError:
+        flash('Article not found', 'error')
+        return redirect(url_for('index'))
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -157,29 +164,28 @@ def login():
         username = request.form.get('username')
         password = request.form.get('password')
         app.logger.debug(f"Login attempt: username='{username}', password='{password}'")
-        user_data = users_collection.find_one({'username': username})
-        if user_data:
-            user = User(user_data)
-            app.logger.debug(f"User found: {user.username}")
-            if user.check_password(password):
+        admin = Admin.query.filter_by(username=username).first()
+        if admin:
+            app.logger.debug(f"Admin found: {admin.username}")
+            if admin.check_password(password):
                 app.logger.debug("Password is correct")
-                login_user(user)
+                login_user(admin)
                 next_page = request.args.get('next')
                 return redirect(next_page or url_for('admin'))
             else:
                 app.logger.debug("Password is incorrect")
         else:
-            app.logger.debug("User not found")
+            app.logger.debug("Admin not found")
         flash('Invalid username or password', 'error')
     return render_template('login.html')
 
-@app.route('/delete/<article_id>')
+@app.route('/delete/<filename>')
 @login_required
-def delete_article(article_id):
-    result = articles_collection.delete_one({'_id': ObjectId(article_id)})
-    if result.deleted_count:
+def delete_article(filename):
+    try:
+        os.remove(os.path.join(ARTICLES_DIR, f'{filename}.md'))
         flash('Article deleted successfully!', 'success')
-    else:
+    except OSError:
         flash('Error deleting the article', 'error')
     return redirect(url_for('index'))
 
@@ -204,21 +210,49 @@ def about():
 
 def create_admin(username, password):
     try:
-        existing_user = users_collection.find_one({'username': username})
-        if not existing_user:
-            password_hash = generate_password_hash(password, method='pbkdf2:sha256')
-            users_collection.insert_one({
-                'username': username,
-                'password_hash': password_hash
-            })
-            app.logger.info(f"Admin user '{username}' created successfully.")
+        admin = Admin.query.filter_by(username=username).first()
+        if admin is None:
+            admin = Admin(username=username)
+            db.session.add(admin)
+        admin.set_password(password)
+        db.session.commit()
+        app.logger.info(f"Admin user '{username}' created/updated successfully.")
+        app.logger.info(f"Password hash: {admin.password_hash}")
+        
+        # Verify the admin exists and password works
+        admin = Admin.query.filter_by(username=username).first()
+        if admin and admin.check_password(password):
+            app.logger.info("Admin credentials are correct.")
         else:
-            app.logger.info(f"Admin user '{username}' already exists.")
+            app.logger.error("Failed to verify admin credentials.")
+        
+        # Print all users in the database
+        all_users = Admin.query.all()
+        for user in all_users:
+            app.logger.info(f"User: {user.username}, Password hash: {user.password_hash}")
     except Exception as e:
         app.logger.error(f"Error creating admin user: {str(e)}")
+        db.session.rollback()
+        
+def update_password_hashes():
+    with app.app_context():
+        admins = Admin.query.all()
+        for admin in admins:
+            if admin.password_hash.startswith('scrypt:'):
+                # You'll need to set a temporary password here
+                admin.set_password('jungdala')
+        db.session.commit()
+        
+def reset_database():
+    with app.app_context():
+        db.drop_all()
+        db.create_all()
+        create_admin('admin', 'Jungdala')
+        app.logger.info("Database reset and admin user created")
 
 if __name__ == '__main__':
-    create_admin('admin', 'Jungdala')
+    reset_database()
+    os.makedirs(ARTICLES_DIR, exist_ok=True)
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
     app.logger.info("Starting server on http://localhost:5001")
     app.run(debug=True, host='localhost', port=5001)
