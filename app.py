@@ -57,7 +57,6 @@ def allowed_file(filename):
 
 
 
-
 @app.route('/')
 def index():
     app.logger.debug("Rendering index template")
@@ -68,11 +67,11 @@ def index():
     skip = (page - 1) * per_page
     
     try:
-        articles_data = list(articles_collection.find().sort('created_at', -1).skip(skip).limit(per_page))
-        articles = [Article.from_db(article_data) for article_data in articles_data]
-    except InvalidId:
+        articles_data = list(articles_collection.find({}).sort('created_at', -1).skip(skip).limit(per_page))
+        articles = [Article.from_db(article_data) for article_data in articles_data if article_data]
+    except Exception as e:
+        app.logger.error(f"Error querying articles: {str(e)}")
         articles = []
-        app.logger.error("Invalid ObjectId encountered in article query")
     
     app.logger.debug(f"Articles: {articles}")
     app.logger.debug(f"Page: {page}, Per page: {per_page}, Total: {total}")

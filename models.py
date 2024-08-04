@@ -54,18 +54,12 @@ class Article:
     def from_db(article_data):
         if not article_data:
             return None
-        article_id = article_data.get('_id')
-        if isinstance(article_id, str):
-            try:
-                article_id = ObjectId(article_id)
-            except InvalidId:
-                return None
         return Article(
-            title=article_data['title'],
-            content=article_data['content'],
+            title=article_data.get('title', ''),
+            content=article_data.get('content', ''),
             created_at=article_data.get('created_at', datetime.utcnow()),
             updated_at=article_data.get('updated_at', datetime.utcnow()),
-            _id=article_id
+            _id=article_data.get('_id')
         )
 
     def to_db(self):
