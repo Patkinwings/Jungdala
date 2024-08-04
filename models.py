@@ -49,6 +49,7 @@ class Article:
         self.updated_at = updated_at or datetime.utcnow()
         self._id = _id
 
+    
     @staticmethod
     def from_db(article_data):
         if not article_data:
